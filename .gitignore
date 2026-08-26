@@ -1,0 +1,39 @@
+# VS Code
+.vscode/
+
+# Visual Studio
+.vs/
+
+# Windows files
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Backup files
+*.bak
+*.old
+
+# Scratch (disposable prep — never track)
+Scratch/
+
+# Environment / secrets (real env files — never track; §J6)
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Dependency / build folders
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+.phpunit.cache/
+
+# OS metadata
+.DS_Store
