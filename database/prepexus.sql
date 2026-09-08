@@ -114,15 +114,17 @@ CREATE TABLE `users` (
   `email` varchar(100) NOT NULL,
   `password` varchar(255) NOT NULL,
   `course` varchar(50) NOT NULL,
-  `semester` varchar(20) NOT NULL
+  `semester` varchar(20) NOT NULL,
+  `role` enum('student','admin') NOT NULL DEFAULT 'student'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `users`
 --
 
-INSERT INTO `users` (`id`, `name`, `email`, `password`, `course`, `semester`) VALUES
-(1, 'Kamal Padhi', 'padhikamal13@gmail.com', '[REDACTED-HASH]', 'BCA', '6th Semester');
+INSERT INTO `users` (`id`, `name`, `email`, `password`, `course`, `semester`, `role`) VALUES
+(1, 'Kamal Padhi', 'padhikamal13@gmail.com', '[REDACTED-HASH]', 'BCA', '6th Semester', 'student'),
+(2, 'System Admin', 'admin@prepexus.com', '[REDACTED-HASH]', 'System', 'N/A', 'admin');
 
 --
 -- Indexes for dumped tables

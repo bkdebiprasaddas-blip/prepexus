@@ -2,7 +2,7 @@
 
 session_start();
 
-include "config/database.php";
+include "config/database.php";
 
 // CSRF token
 if (empty($_SESSION['csrf_token'])) {
@@ -10,15 +10,19 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-
 function verify_csrf() {
     return isset($_POST['csrf_token'])
         && isset($_SESSION['csrf_token'])
         && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
-// Already logged in? Go to dashboard.
+}
+
+// Already logged in? Redirect based on role.
 if (isset($_SESSION['user_id'])) {
-    header("Location: dashboard.php");
+    if (isset($_SESSION['user_role']) && $_SESSION['user_role'] === 'admin') {
+        header("Location: admin/dashboard.php");
+    } else {
+        header("Location: dashboard.php");
+    }
     exit();
 }
 
@@ -57,8 +61,13 @@ if (isset($_POST['login'])) {
 
                 $_SESSION['user_id'] = $user['id'];
                 $_SESSION['user_name'] = $user['name'];
+                $_SESSION['user_role'] = $user['role'];
 
-                header("Location: dashboard.php");
+                if ($user['role'] === 'admin') {
+                    header("Location: admin/dashboard.php");
+                } else {
+                    header("Location: dashboard.php");
+                }
                 exit();
 
             } else {
