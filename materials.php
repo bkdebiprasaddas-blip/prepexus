@@ -1,36 +1,90 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
-
 
 // ==================================================
 // CHECK LOGIN
 // ==================================================
 
-if (!isset($_SESSION['user_id'])) {
+require_login();
 
-    header("Location: login.php");
-    exit();
+$user_id = current_user_id();
 
-}
-
-$user_id = $_SESSION['user_id'];
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+$csrf_token = csrf_token();
+
+
+$material_errors = array(
+    'subject' => "Please choose one of your own subjects.",
+    'name'    => "Please enter a material name (150 characters max).",
+    'type'    => "Please choose a valid material type.",
+    'link'    => "Please enter a valid http:// or https:// link.",
+    'desc'    => "Description must be 255 characters or fewer.",
+    'save'    => "Could not save the material. Please try again.",
+);
+
+$message = "";
+
+if (isset($_GET['err']) && isset($material_errors[$_GET['err']])) {
+    $message = $material_errors[$_GET['err']];
 }
-$csrf_token = $_SESSION['csrf_token'];
 
 
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
+/**
+ * Collect and validate the fields shared by the add and update
+ * handlers. Returns null and sets $error_code on the first problem.
+ */
+function collect_material_input($conn, $user_id, &$error_code)
+{
+    $error_code = "";
+
+    $subject_id    = (int) ($_POST['subject_id'] ?? 0);
+    $material_name = trim($_POST['material_name'] ?? '');
+    $material_type = trim($_POST['material_type'] ?? '');
+    $material_link = trim($_POST['material_link'] ?? '');
+    $description   = trim($_POST['description'] ?? '');
+
+    // The subject must belong to this user. Without this check a
+    // material can be attached to somebody else's subject, and the
+    // listing JOIN then discloses that subject's name.
+    if (!user_owns_subject($conn, $user_id, $subject_id)) {
+        $error_code = 'subject';
+        return null;
+    }
+
+    if ($material_name === '' || strlen($material_name) > 150) {
+        $error_code = 'name';
+        return null;
+    }
+
+    if (!is_valid_material_type($material_type)) {
+        $error_code = 'type';
+        return null;
+    }
+
+    // Reject javascript:, data: and vbscript: at the trust boundary.
+    // htmlspecialchars() would happily let those through.
+    if (!is_valid_url($material_link) || strlen($material_link) > 255) {
+        $error_code = 'link';
+        return null;
+    }
+
+    if (strlen($description) > 255) {
+        $error_code = 'desc';
+        return null;
+    }
+
+    return array(
+        'subject_id'    => $subject_id,
+        'material_name' => $material_name,
+        'material_type' => $material_type,
+        'material_link' => safe_url($material_link),
+        'description'   => $description,
+    );
 }
-
 
 
 // ==================================================
@@ -41,37 +95,44 @@ if (isset($_POST['add_material'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $subject_id = $_POST['subject_id'];
-    $material_name = $_POST['material_name'];
-    $material_type = $_POST['material_type'];
-    $material_link = $_POST['material_link'];
-    $description = $_POST['description'];
+    $error_code = "";
+    $input = collect_material_input($conn, $user_id, $error_code);
 
+    if ($input === null) {
 
-    // Prepared statement -- prevents SQL injection
-    $stmt = mysqli_prepare($conn,
-        "INSERT INTO materials
-            (user_id, subject_id, material_name,
-             material_type, material_link, description)
-            VALUES (?, ?, ?, ?, ?, ?)"
-    );
+        $message = $material_errors[$error_code] ?? $material_errors['save'];
 
-    if ($stmt) {
-        mysqli_stmt_bind_param($stmt, "iissss",
-            $user_id, $subject_id, $material_name,
-            $material_type, $material_link, $description
+    } else {
+
+        $stmt = mysqli_prepare($conn,
+            "INSERT INTO materials
+                (user_id, subject_id, material_name,
+                 material_type, material_link, description)
+                VALUES (?, ?, ?, ?, ?, ?)"
         );
-        mysqli_stmt_execute($stmt);
-        mysqli_stmt_close($stmt);
+
+        $inserted = $stmt && mysqli_stmt_execute($stmt, array(
+            $user_id,
+            $input['subject_id'],
+            $input['material_name'],
+            $input['material_type'],
+            $input['material_link'],
+            $input['description'],
+        ));
+
+        if ($stmt) {
+            mysqli_stmt_close($stmt);
+        }
+
+        // Only claim success when the row was really written. The old
+        // code redirected with ?success=1 unconditionally.
+        if ($inserted) {
+            header("Location: materials.php?success=1");
+            exit();
+        }
+
+        $message = $material_errors['save'];
     }
-
-
-    // Prevent duplicate insertion on refresh
-
-    header("Location: materials.php?success=1");
-
-    exit();
-
 }
 
 
@@ -83,8 +144,7 @@ if (isset($_POST['delete_id'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $id = $_POST['delete_id'];
-
+    $id = (int) $_POST['delete_id'];
 
     $stmt = mysqli_prepare($conn,
         "DELETE FROM materials
@@ -92,17 +152,20 @@ if (isset($_POST['delete_id'])) {
             AND user_id = ?"
     );
 
+    $deleted = false;
+
     if ($stmt) {
         mysqli_stmt_bind_param($stmt, "ii", $id, $user_id);
-        mysqli_stmt_execute($stmt);
+
+        if (mysqli_stmt_execute($stmt)) {
+            $deleted = mysqli_stmt_affected_rows($stmt) > 0;
+        }
+
         mysqli_stmt_close($stmt);
     }
 
-
-    header("Location: materials.php?deleted=1");
-
+    header("Location: materials.php?" . ($deleted ? "deleted=1" : "err=save"));
     exit();
-
 }
 
 
@@ -115,8 +178,7 @@ $edit_material = null;
 
 if (isset($_GET['edit'])) {
 
-    $id = $_GET['edit'];
-
+    $id = (int) $_GET['edit'];
 
     $stmt = mysqli_prepare($conn,
         "SELECT *
@@ -125,18 +187,20 @@ if (isset($_GET['edit'])) {
             AND user_id = ?"
     );
 
+    $edit_result = null;
+
     if ($stmt) {
         mysqli_stmt_bind_param($stmt, "ii", $id, $user_id);
         mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-    } else {
-        $result = false;
+        $edit_result = mysqli_stmt_get_result($stmt);
+        mysqli_stmt_close($stmt);
     }
 
+    // Guarded: mysqli_num_rows() is a TypeError on PHP 8 if the
+    // statement failed and $result is false.
+    if ($edit_result instanceof mysqli_result && mysqli_num_rows($edit_result) > 0) {
 
-    if (mysqli_num_rows($result) > 0) {
-
-        $edit_material = mysqli_fetch_assoc($result);
+        $edit_material = mysqli_fetch_assoc($edit_result);
 
     }
 
@@ -151,14 +215,19 @@ if (isset($_POST['update_material'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $id = $_POST['id'];
+    $id = (int) $_POST['id'];
 
-    $subject_id = $_POST['subject_id'];
-    $material_name = $_POST['material_name'];
-    $material_type = $_POST['material_type'];
-    $material_link = $_POST['material_link'];
-    $description = $_POST['description'];
+    $error_code = "";
+    $input = collect_material_input($conn, $user_id, $error_code);
 
+    if ($input === null) {
+
+        // Bounce back through the edit form so the visitor keeps
+        // context instead of landing on a bare error page.
+        header("Location: materials.php?edit=$id&err=" . urlencode($error_code ?: 'save'));
+        exit();
+
+    }
 
     $stmt = mysqli_prepare($conn,
         "UPDATE materials SET
@@ -171,20 +240,22 @@ if (isset($_POST['update_material'])) {
             AND user_id = ?"
     );
 
+    $updated = $stmt && mysqli_stmt_execute($stmt, array(
+        $input['subject_id'],
+        $input['material_name'],
+        $input['material_type'],
+        $input['material_link'],
+        $input['description'],
+        $id,
+        $user_id,
+    ));
+
     if ($stmt) {
-        mysqli_stmt_bind_param($stmt, "issssis",
-            $subject_id, $material_name, $material_type,
-            $material_link, $description, $id, $user_id
-        );
-        mysqli_stmt_execute($stmt);
         mysqli_stmt_close($stmt);
     }
 
-
-    header("Location: materials.php?updated=1");
-
+    header("Location: materials.php?" . ($updated ? "updated=1" : "err=save"));
     exit();
-
 }
 
 
@@ -305,8 +376,8 @@ mysqli_stmt_close($materials_stmt);
 
             <?php
 
-            echo strtoupper(
-                substr($_SESSION['user_name'], 0, 1)
+            echo initial(
+                $_SESSION['user_name']
             );
 
             ?>
@@ -454,7 +525,7 @@ mysqli_stmt_close($materials_stmt);
 
 
         <a
-            href="logout.php"
+            href="logout.php?token=<?php echo e($csrf_token); ?>"
             class="sidebar-logout"
         >
 
@@ -558,6 +629,17 @@ mysqli_stmt_close($materials_stmt);
     <!-- ==================================================
          SUCCESS MESSAGES
          ================================================== -->
+
+
+    <?php if ($message != "") { ?>
+
+        <div class="material-message delete-material">
+
+            <?php echo e($message); ?>
+
+        </div>
+
+    <?php } ?>
 
 
     <?php if (isset($_GET['success'])) { ?>
@@ -670,7 +752,7 @@ mysqli_stmt_close($materials_stmt);
 
         <form method="POST">
                 <input type="hidden" name="csrf_token"
-                     value="<?php echo $csrf_token; ?>">
+                     value="<?php echo e($csrf_token); ?>">
 
 
             <?php if ($edit_material != null) { ?>
@@ -678,7 +760,7 @@ mysqli_stmt_close($materials_stmt);
                 <input
                     type="hidden"
                     name="id"
-                    value="<?php echo $edit_material['id']; ?>"
+                    value="<?php echo (int) $edit_material['id']; ?>"
                 >
 
             <?php } ?>
@@ -756,7 +838,7 @@ mysqli_stmt_close($materials_stmt);
 
 
                         <option
-                            value="<?php echo $subject['id']; ?>"
+                            value="<?php echo (int) $subject['id']; ?>"
 
                             <?php
 
@@ -1218,7 +1300,7 @@ mysqli_stmt_close($materials_stmt);
                                 <!-- OPEN -->
 
                                 <a
-                                    href="<?php echo htmlspecialchars($row['material_link']); ?>"
+                                    href="<?php echo e(safe_url($row['material_link'])); ?>"
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     class="material-open-button"
@@ -1233,7 +1315,7 @@ mysqli_stmt_close($materials_stmt);
                                 <!-- EDIT -->
 
                                 <a
-                                    href="materials.php?edit=<?php echo $row['id']; ?>"
+                                    href="materials.php?edit=<?php echo (int) $row['id']; ?>"
                                     class="material-edit-button"
                                 >
 
@@ -1245,7 +1327,7 @@ mysqli_stmt_close($materials_stmt);
 
                                 <!-- DELETE -->
 
-                                <form method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this material?');"><input type="hidden" name="delete_id" value="<?php echo $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>"><button type="submit" class="material-delete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#df5353;font-weight:bold;font-size:12px;">Delete</button></form>
+                                <form method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this material?');"><input type="hidden" name="delete_id" value="<?php echo (int) $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo e($csrf_token); ?>"><button type="submit" class="material-delete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#df5353;font-weight:bold;font-size:12px;">Delete</button></form>
 
 
                             </div>

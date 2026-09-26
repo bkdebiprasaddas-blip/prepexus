@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
 
@@ -9,14 +9,9 @@ include "config/database.php";
 // CHECK LOGIN
 // ==========================================
 
-if (!isset($_SESSION['user_id'])) {
+require_login();
 
-    header("Location: login.php");
-    exit();
-
-}
-
-$user_id = $_SESSION['user_id'];
+$user_id = current_user_id();
 
 
 // ==========================================
@@ -214,8 +209,8 @@ mysqli_stmt_close($counts_stmt);
 
             <?php
 
-            echo strtoupper(
-                substr($_SESSION['user_name'], 0, 1)
+            echo initial(
+                $_SESSION['user_name']
             );
 
             ?>
@@ -363,7 +358,7 @@ mysqli_stmt_close($counts_stmt);
 
 
         <a
-            href="logout.php"
+            href="logout.php?token=<?php echo e(csrf_token()); ?>"
             class="sidebar-logout"
         >
 

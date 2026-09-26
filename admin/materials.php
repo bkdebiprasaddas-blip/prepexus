@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/../includes/security.php";
 
 include "../config/database.php";
 include "header.php";
@@ -8,27 +8,34 @@ include "header.php";
 $message = "";
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
+$csrf_token = csrf_token();
 
 // DELETE MATERIAL AS ADMIN
 if (isset($_POST['delete_material'])) {
     if (!verify_csrf()) { die('Invalid request.'); }
-    $material_id = (int)$_POST['material_id'];
 
-    $del = mysqli_query($conn, "DELETE FROM materials WHERE id = $material_id");
-    if ($del) {
-        $message = "Study material deleted successfully.";
+    $material_id = (int) $_POST['material_id'];
+
+    if ($material_id <= 0) {
+        $message = "Invalid material selected.";
     } else {
-        $message = "Failed to delete study material.";
+
+        $stmt = mysqli_prepare($conn, "DELETE FROM materials WHERE id = ?");
+
+        // True does not mean a row was matched, so confirm.
+        if ($stmt) {
+            mysqli_stmt_bind_param($stmt, "i", $material_id);
+
+            if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) {
+                $message = "Study material deleted successfully.";
+            } else {
+                $message = "Failed to delete study material.";
+            }
+
+            mysqli_stmt_close($stmt);
+        } else {
+            $message = "Failed to delete study material.";
+        }
     }
 }
 
@@ -72,7 +79,7 @@ $materials_result = mysqli_query($conn, $query);
                 <tbody>
                     <?php while ($m = mysqli_fetch_assoc($materials_result)) { ?>
                         <tr>
-                            <td><?php echo $m['id']; ?></td>
+                            <td><?php echo (int) $m['id']; ?></td>
                             <td><strong><?php echo htmlspecialchars($m['student_name']); ?></strong></td>
                             <td><?php echo htmlspecialchars($m['subject_name']); ?></td>
                             <td><?php echo htmlspecialchars($m['material_name']); ?></td>
@@ -82,14 +89,14 @@ $materials_result = mysqli_query($conn, $query);
                                 </span>
                             </td>
                             <td>
-                                <a href="<?php echo htmlspecialchars($m['material_link']); ?>" target="_blank" class="btn-action btn-role">
+                                <a href="<?php echo e(safe_url($m['material_link'])); ?>" target="_blank" rel="noopener noreferrer" class="btn-action btn-role">
                                     Open Link ↗
                                 </a>
                             </td>
                             <td style="text-align: center;">
                                 <form method="POST" style="display:inline-block;" onsubmit="return confirm('Delete this study material?');">
-                                    <input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>">
-                                    <input type="hidden" name="material_id" value="<?php echo $m['id']; ?>">
+                                    <input type="hidden" name="csrf_token" value="<?php echo e($csrf_token); ?>">
+                                    <input type="hidden" name="material_id" value="<?php echo (int) $m['id']; ?>">
                                     <button type="submit" name="delete_material" class="btn-action btn-danger">
                                         Delete
                                     </button>

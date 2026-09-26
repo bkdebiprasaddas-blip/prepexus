@@ -1,0 +1,35 @@
+# ==========================================================
+#  Prepexus - Apache hardening (root)
+#  Requires: AllowOverride FileInfo (XAMPP ships AllowOverride All)
+# ==========================================================
+
+# ---- Never serve directory listings -------------------------
+Options -Indexes -MultiViews
+
+# ---- Do not advertise the PHP version -----------------------
+<IfModule mod_php.c>
+    php_flag expose_php off
+</IfModule>
+
+# ---- Never serve VCS metadata -------------------------------
+# .git exposes the full history, including any credential that
+# was ever committed and later "removed".
+RedirectMatch 404 /\.git
+
+# ---- Never serve dotfiles -----------------------------------
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# ---- Never serve dumps, databases, or secret files ----------
+<FilesMatch "\.(sql|sqlite|sqlite3|db|mdb|log|bak|old|orig|swp|ini|env|pem|key|crt)$">
+    Require all denied
+</FilesMatch>
+
+# ---- Basic response headers ---------------------------------
+# X-Content-Type-Options / X-Frame-Options / Referrer-Policy are
+# emitted by includes/security.php instead, so setting them here as
+# well would produce doubled values on every PHP response.
+<IfModule mod_headers.c>
+    Header always unset X-Powered-By
+</IfModule>

@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
 
@@ -11,17 +11,7 @@ if (isset($_SESSION['user_id'])) {
 }
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
-
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
+$csrf_token = csrf_token();
 
 
 $message = "";// Show validation errors
@@ -29,55 +19,86 @@ if (isset($_GET['error']) && $_GET['error'] === 'pw') {
     $message = "Password must be at least 8 characters and both passwords must match.";
 }
 
-
 if (isset($_POST['register'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $name = $_POST['name'];
-    $email = $_POST['email'];
-    $password = $_POST['password'];
-    $course = $_POST['course'];
-    $semester = $_POST['semester'];
+    // Server-side validation. The form constraints are a convenience
+    // for the visitor, never a guarantee about what arrives here.
+    $name = trim($_POST['name'] ?? '');
+    $email = normalize_email($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $course = trim($_POST['course'] ?? '');
+    $semester = $_POST['semester'] ?? '';
+
     // Password policy (B-022 / B-024)
     $confirm = isset($_POST['confirm_password']) ? $_POST['confirm_password'] : '';
+
     if (strlen($password) < 8 || $password !== $confirm) {
         header("Location: register.php?error=pw");
         exit();
     }
 
+    if ($name === '' || strlen($name) > 100) {
+        $message = "Please enter your full name (100 characters max).";
+    } elseif (!is_valid_email($email)) {
+        $message = "Please enter a valid email address.";
+    } elseif ($course === '' || strlen($course) > 50) {
+        $message = "Please enter your course (50 characters max).";
+    } elseif (!is_valid_semester($semester)) {
+        $message = "Please select a valid semester.";
+    } else {
 
-    // Check for duplicate email using prepared statement
-    $check_stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE email = ? LIMIT 1");
-    if ($check_stmt) {
-        mysqli_stmt_bind_param($check_stmt, "s", $email);
-        mysqli_stmt_execute($check_stmt);
-        $check_result = mysqli_stmt_get_result($check_stmt);
+        // Check for duplicate email using prepared statement.
+        // The UNIQUE index on users.email is the real guarantee: this
+        // SELECT cannot rule out a concurrent signup, so the insert
+        // error below is treated as authoritative.
+        $check_stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE email = ? LIMIT 1");
+        if ($check_stmt) {
+            mysqli_stmt_bind_param($check_stmt, "s", $email);
+            mysqli_stmt_execute($check_stmt);
+            $check_result = mysqli_stmt_get_result($check_stmt);
 
-        if (mysqli_num_rows($check_result) > 0) {
-            $message = "Email already registered.";
-        } else {
-            // Hash password before storing
-            $password_hash = password_hash($password, PASSWORD_DEFAULT);
+            $duplicate = $check_result && mysqli_num_rows($check_result) > 0;
 
-            // Insert using prepared statement
-            $stmt = mysqli_prepare($conn, "INSERT INTO users (name, email, password, course, semester) VALUES (?, ?, ?, ?, ?)");
-            if ($stmt) {
-                mysqli_stmt_bind_param($stmt, "sssss", $name, $email, $password_hash, $course, $semester);
-                if (mysqli_stmt_execute($stmt)) {
-                    header("Location: login.php?registered=1");
-                exit();
+            mysqli_stmt_close($check_stmt);
+
+            if ($duplicate) {
+                $message = "Email already registered.";
+            } else {
+                // Hash password before storing
+                $password_hash = password_hash($password, PASSWORD_DEFAULT);
+
+                // Insert using prepared statement
+                $stmt = mysqli_prepare($conn, "INSERT INTO users (name, email, password, course, semester) VALUES (?, ?, ?, ?, ?)");
+                if ($stmt) {
+                    mysqli_stmt_bind_param($stmt, "sssss", $name, $email, $password_hash, $course, $semester);
+
+                    if (mysqli_stmt_execute($stmt)) {
+
+                        // Rotate now that the account exists, so the
+                        // pre-registration token cannot be reused.
+                        rotate_csrf_token();
+
+                        header("Location: login.php?registered=1");
+                        exit();
+
+                    } else {
+
+                        // 1062 = duplicate key: lost the registration race.
+                        $message = (mysqli_errno($conn) === 1062)
+                            ? "Email already registered."
+                            : "Registration failed. Please try again.";
+                    }
+
+                    mysqli_stmt_close($stmt);
                 } else {
                     $message = "Registration failed. Please try again.";
                 }
-                mysqli_stmt_close($stmt);
-            } else {
-                $message = "Registration failed. Please try again.";
             }
+        } else {
+            $message = "Registration failed. Please try again.";
         }
-        mysqli_stmt_close($check_stmt);
-    } else {
-        $message = "Registration failed. Please try again.";
     }
 }
 
@@ -135,7 +156,7 @@ include "includes/navbar.php";
 
         <form method="POST">
                 <input type="hidden" name="csrf_token"
-                     value="<?php echo $csrf_token; ?>">
+                     value="<?php echo e($csrf_token); ?>">
 
 
             <div class="form-group">

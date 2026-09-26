@@ -121,10 +121,56 @@ CREATE TABLE `users` (
 --
 -- Dumping data for table `users`
 --
+-- !! SECURITY NOTE !!
+-- These are THROW-AWAY credentials for a fresh local install only.
+-- Temporary password for the admin account : ChangeMe!Admin2026
+-- Temporary password for the student account: ChangeMe!Student2026
+-- Change both immediately after importing, and never re-export this
+-- file with real accounts in it. Each account has a distinct hash here;
+-- sharing one hash across accounts means sharing one password.
+--
 
 INSERT INTO `users` (`id`, `name`, `email`, `password`, `course`, `semester`, `role`) VALUES
-(1, 'Kamal Padhi', 'padhikamal13@gmail.com', '[REDACTED-HASH]', 'BCA', '6th Semester', 'student'),
-(2, 'System Admin', 'admin@prepexus.com', '[REDACTED-HASH]', 'System', 'N/A', 'admin');
+(1, 'Kamal Padhi', 'padhikamal13@gmail.com', '$2y$10$an0ZriPVoMDMasMTIDefZOXCQ55O6qd6mWR7NeYT3OBLMM9WCO/Dm', 'BCA', '6th Semester', 'student'),
+(2, 'System Admin', 'admin@prepexus.com', '$2y$10$ImG7Hc3ibeR6UoyIPcYIFe8OB4dHC6fDhGJZ7oarV89Thx4VJqGRS', 'System', 'N/A', 'admin');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `login_attempts`
+--
+-- Backing store for the login throttle in includes/security.php.
+-- Records one row per failed attempt, keyed by email + client IP.
+--
+
+CREATE TABLE `login_attempts` (
+  `id` int(11) NOT NULL,
+  `email` varchar(100) NOT NULL,
+  `ip_address` varchar(45) NOT NULL,
+  `attempted_at` datetime NOT NULL,
+  `was_successful` tinyint(1) NOT NULL DEFAULT '0'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Indexes for dumped tables
+--
+
+--
+-- Indexes for table `login_attempts`
+--
+ALTER TABLE `login_attempts`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `email_ip_time` (`email`, `ip_address`, `attempted_at`);
+
+--
+-- AUTO_INCREMENT for dumped tables
+--
+
+--
+-- AUTO_INCREMENT for table `login_attempts`
+--
+ALTER TABLE `login_attempts`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=1;
 
 --
 -- Indexes for dumped tables
@@ -156,8 +202,14 @@ ALTER TABLE `tasks`
 --
 -- Indexes for table `users`
 --
+-- UNIQUE on email closes the registration race: without it two
+-- concurrent signups can both pass the "SELECT id FROM users WHERE
+-- email = ?" pre-check and insert duplicate accounts, and login
+-- then resolves them arbitrarily via LIMIT 1.
+--
 ALTER TABLE `users`
-  ADD PRIMARY KEY (`id`);
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `email` (`email`);
 
 --
 -- AUTO_INCREMENT for dumped tables

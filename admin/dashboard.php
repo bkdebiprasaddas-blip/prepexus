@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/../includes/security.php";
 
 include "../config/database.php";
 include "header.php";
@@ -98,7 +98,7 @@ $recent_users = mysqli_query($conn, "SELECT id, name, email, course, semester, r
                 <tbody>
                     <?php while ($u = mysqli_fetch_assoc($recent_users)) { ?>
                         <tr>
-                            <td><?php echo $u['id']; ?></td>
+                            <td><?php echo (int) $u['id']; ?></td>
                             <td><strong><?php echo htmlspecialchars($u['name']); ?></strong></td>
                             <td><?php echo htmlspecialchars($u['email']); ?></td>
                             <td><?php echo htmlspecialchars($u['course']); ?></td>

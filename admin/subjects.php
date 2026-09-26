@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/../includes/security.php";
 
 include "../config/database.php";
 include "header.php";
@@ -8,30 +8,61 @@ include "header.php";
 $message = "";
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
+$csrf_token = csrf_token();
 
 // DELETE SUBJECT AS ADMIN
 if (isset($_POST['delete_subject'])) {
     if (!verify_csrf()) { die('Invalid request.'); }
-    $subject_id = (int)$_POST['subject_id'];
 
-    mysqli_query($conn, "DELETE FROM tasks WHERE subject_id = $subject_id");
-    mysqli_query($conn, "DELETE FROM materials WHERE subject_id = $subject_id");
-    $del = mysqli_query($conn, "DELETE FROM subjects WHERE id = $subject_id");
+    $subject_id = (int) $_POST['subject_id'];
 
-    if ($del) {
-        $message = "Subject and associated data deleted successfully.";
+    if ($subject_id <= 0) {
+        $message = "Invalid subject selected.";
     } else {
-        $message = "Failed to delete subject.";
+
+        // Child rows first for the same foreign-key reason as the user
+        // delete. Every value is bound.
+        $ok = true;
+
+        $child_deletes = array(
+            "DELETE FROM tasks WHERE subject_id = ?",
+            "DELETE FROM materials WHERE subject_id = ?",
+        );
+
+        foreach ($child_deletes as $sql) {
+
+            $s = mysqli_prepare($conn, $sql);
+
+            if (!$s) {
+                $ok = false;
+                break;
+            }
+
+            mysqli_stmt_bind_param($s, "i", $subject_id);
+            $ok = mysqli_stmt_execute($s);
+            mysqli_stmt_close($s);
+
+            if (!$ok) {
+                break;
+            }
+        }
+
+        if ($ok) {
+
+            $s = mysqli_prepare($conn, "DELETE FROM subjects WHERE id = ?");
+
+            if ($s) {
+                mysqli_stmt_bind_param($s, "i", $subject_id);
+                $ok = mysqli_stmt_execute($s) && mysqli_stmt_affected_rows($s) > 0;
+                mysqli_stmt_close($s);
+            } else {
+                $ok = false;
+            }
+        }
+
+        $message = $ok
+            ? "Subject and associated data deleted successfully."
+            : "Failed to delete subject.";
     }
 }
 
@@ -74,7 +105,7 @@ $subjects_result = mysqli_query($conn, $query);
                 <tbody>
                     <?php while ($s = mysqli_fetch_assoc($subjects_result)) { ?>
                         <tr>
-                            <td><?php echo $s['id']; ?></td>
+                            <td><?php echo (int) $s['id']; ?></td>
                             <td>
                                 <strong><?php echo htmlspecialchars($s['student_name']); ?></strong><br>
                                 <small style="color: #7f8c8d;"><?php echo htmlspecialchars($s['student_email']); ?></small>
@@ -85,8 +116,8 @@ $subjects_result = mysqli_query($conn, $query);
                             <td><?php echo htmlspecialchars($s['description']); ?></td>
                             <td style="text-align: center;">
                                 <form method="POST" style="display:inline-block;" onsubmit="return confirm('Delete this subject and all its associated tasks and materials?');">
-                                    <input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>">
-                                    <input type="hidden" name="subject_id" value="<?php echo $s['id']; ?>">
+                                    <input type="hidden" name="csrf_token" value="<?php echo e($csrf_token); ?>">
+                                    <input type="hidden" name="subject_id" value="<?php echo (int) $s['id']; ?>">
                                     <button type="submit" name="delete_subject" class="btn-action btn-danger">
                                         Delete
                                     </button>

@@ -1,4 +1,4 @@
-﻿<nav>
+<nav>
 
     <div class="logo">
         <img src="images/prepxus.png" alt="Prepexus Logo">

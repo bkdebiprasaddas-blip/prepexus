@@ -1,11 +1,18 @@
 <?php
-if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'admin') {
-    header("Location: ../login.php");
-    exit();
-}
+// Single source of truth for admin access control. Passes $conn so the
+// role is re-read from the users row instead of trusting the session copy.
+require_admin($conn ?? null);
 
 $admin_name = $_SESSION['user_name'];
-$current_page = basename($_SERVER['PHP_SELF']);
+
+// Allow-listed: $_SERVER values are request-controlled, so the value is
+// matched against a fixed set before it is ever echoed.
+$admin_pages = array('dashboard.php', 'users.php', 'subjects.php', 'materials.php');
+$current_page = basename((string) ($_SERVER['SCRIPT_NAME'] ?? ''));
+
+if (!in_array($current_page, $admin_pages, true)) {
+    $current_page = '';
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -162,7 +169,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
     </div>
     <div class="dashboard-user">
         <div class="user-avatar" style="background-color: #e74c3c; color: white;">
-            <?php echo strtoupper(substr($admin_name, 0, 1)); ?>
+            <?php echo initial($admin_name); ?>
         </div>
         <span>
             <?php echo htmlspecialchars($admin_name); ?>
@@ -190,7 +197,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
         <a href="materials.php" class="<?php echo $current_page === 'materials.php' ? 'active' : ''; ?>">
             <span class="sidebar-icon">📖</span> All Materials
         </a>
-        <a href="../logout.php" class="sidebar-logout">
+        <a href="../logout.php?token=<?php echo e(csrf_token()); ?>" class="sidebar-logout">
             <span class="sidebar-icon">🚪</span> Logout
         </a>
     </div>

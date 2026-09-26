@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
 
@@ -8,29 +8,13 @@ include "config/database.php";
 // ==================================================
 // CHECK LOGIN
 // ==================================================
+require_login();
 
-if (!isset($_SESSION['user_id'])) {
+$user_id = current_user_id();
 
-    header("Location: login.php");
-
-    exit();
-
-}
-
-$user_id = $_SESSION['user_id'];
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
-
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
+$csrf_token = csrf_token();
 
 
 $message = "";
@@ -44,19 +28,33 @@ if (isset($_POST['update_profile'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $name = trim($_POST['name']);
-    $email = trim($_POST['email']);
-    $course = trim($_POST['course']);
-    $semester = $_POST['semester'];
+    $name = trim($_POST['name'] ?? '');
+    $email = normalize_email($_POST['email'] ?? '');
+    $course = trim($_POST['course'] ?? '');
+    $semester = $_POST['semester'] ?? '';
 
     // Validate required fields
-    if ($name == "" || $email == "") {
+    if ($name === '' || strlen($name) > 100) {
 
-        $message = "Name and email are required.";
+        $message = "Name is required (100 characters max).";
+
+    } elseif (!is_valid_email($email)) {
+
+        $message = "Please enter a valid email address.";
+
+    } elseif (strlen($course) > 50) {
+
+        $message = "Course must be 50 characters or fewer.";
+
+    } elseif ($semester !== '' && !is_valid_semester($semester)) {
+
+        $message = "Please select a valid semester.";
 
     } else {
 
-        // Check the new email is not used by ANOTHER account
+        // Check the new email is not used by ANOTHER account.
+        // The UNIQUE index is the real guarantee; this SELECT cannot
+        // rule out a concurrent update, so 1062 is handled below too.
         $check_stmt = mysqli_prepare($conn,
             "SELECT id FROM users WHERE email = ? AND id != ? LIMIT 1"
         );
@@ -96,11 +94,18 @@ if (isset($_POST['update_profile'])) {
                 );
 
                 if (mysqli_stmt_execute($stmt)) {
+
                     $_SESSION['user_name'] = $name;
+
                     header("Location: profile.php?success=1");
                     exit();
+
                 } else {
-                    $message = "Update failed. Please try again.";
+
+                    $message = (mysqli_errno($conn) === 1062)
+                        ? "This email is already in use by another account."
+                        : "Update failed. Please try again.";
+
                 }
                 mysqli_stmt_close($stmt);
             } else {
@@ -115,13 +120,30 @@ if (isset($_POST['update_profile'])) {
 // GET USER INFORMATION
 // ==================================================
 
-$user_stmt = mysqli_prepare($conn, "SELECT * FROM users WHERE id = ? LIMIT 1");
+// Explicit column list: SELECT * would pull the password hash into the
+// page even though it is never rendered.
+$user = array();
+
+$user_stmt = mysqli_prepare(
+    $conn,
+    "SELECT id, name, email, course, semester, role
+     FROM users
+     WHERE id = ?
+     LIMIT 1"
+);
 
 if ($user_stmt) {
     mysqli_stmt_bind_param($user_stmt, "i", $user_id);
     mysqli_stmt_execute($user_stmt);
     $result = mysqli_stmt_get_result($user_stmt);
-    $user = mysqli_fetch_assoc($result);
+
+    if ($result instanceof mysqli_result) {
+        $found = mysqli_fetch_assoc($result);
+        if ($found) {
+            $user = $found;
+        }
+    }
+
     mysqli_stmt_close($user_stmt);
 }
 
@@ -202,8 +224,8 @@ if ($user_stmt) {
 
             <?php
 
-            echo strtoupper(
-                substr($user['name'], 0, 1)
+            echo initial(
+                $user['name']
             );
 
             ?>
@@ -359,7 +381,7 @@ if ($user_stmt) {
 
 
         <a
-            href="logout.php"
+            href="logout.php?token=<?php echo e($csrf_token); ?>"
             class="sidebar-logout"
         >
 
@@ -485,8 +507,8 @@ if ($user_stmt) {
 
                 <?php
 
-                echo strtoupper(
-                    substr($user['name'], 0, 1)
+                echo initial(
+                    $user['name']
                 );
 
                 ?>
@@ -532,7 +554,7 @@ if ($user_stmt) {
 
         <form method="POST">
                 <input type="hidden" name="csrf_token"
-                     value="<?php echo $csrf_token; ?>">
+                     value="<?php echo e($csrf_token); ?>">
 
 
             <!-- NAME -->

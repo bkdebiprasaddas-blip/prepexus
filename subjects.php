@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
 
@@ -9,28 +9,78 @@ include "config/database.php";
 // CHECK LOGIN
 // ======================================================
 
-if (!isset($_SESSION['user_id'])) {
+require_login();
 
-    header("Location: login.php");
-    exit();
-
-}
-
-$user_id = $_SESSION['user_id'];
+$user_id = current_user_id();
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+$csrf_token = csrf_token();
+
+
+$subject_errors = array(
+    'name'    => "Please enter a subject name (100 characters max).",
+    'code'    => "Please enter a subject code (30 characters max).",
+    'credit'  => "Credit must be a whole number between 1 and 20.",
+    'desc'    => "Description must be 255 characters or fewer.",
+    'save'    => "Could not save the subject. Please try again.",
+);
+
+$message = "";
+
+if (isset($_GET['err']) && isset($subject_errors[$_GET['err']])) {
+    $message = $subject_errors[$_GET['err']];
 }
-$csrf_token = $_SESSION['csrf_token'];
 
 
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
+/**
+ * Collect and validate the fields shared by the add and update
+ * handlers. Returns null and sets $error_code on the first problem.
+ */
+function collect_subject_input(&$error_code)
+{
+    $error_code = "";
+
+    $subject_name = trim($_POST['subject_name'] ?? '');
+    $subject_code = trim($_POST['subject_code'] ?? '');
+    $credit_raw   = trim($_POST['credit'] ?? '');
+    $description  = trim($_POST['description'] ?? '');
+
+    if ($subject_name === '' || strlen($subject_name) > 100) {
+        $error_code = 'name';
+        return null;
+    }
+
+    if ($subject_code === '' || strlen($subject_code) > 30) {
+        $error_code = 'code';
+        return null;
+    }
+
+    // credit is an int column: reject anything non-numeric instead of
+    // letting MySQL silently coerce it to 0.
+    if (!preg_match('/^\d{1,2}$/', $credit_raw)) {
+        $error_code = 'credit';
+        return null;
+    }
+
+    $credit = (int) $credit_raw;
+
+    if ($credit < 1 || $credit > 20) {
+        $error_code = 'credit';
+        return null;
+    }
+
+    if (strlen($description) > 255) {
+        $error_code = 'desc';
+        return null;
+    }
+
+    return array(
+        'subject_name' => $subject_name,
+        'subject_code' => $subject_code,
+        'credit'       => $credit,
+        'description'  => $description,
+    );
 }
-
 
 
 // ======================================================
@@ -41,51 +91,48 @@ if (isset($_POST['add_subject'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $subject_name = trim($_POST['subject_name']);
-    $subject_code = trim($_POST['subject_code']);
-    $credit = $_POST['credit'];
-    $description = trim($_POST['description']);
+    $error_code = "";
+    $input = collect_subject_input($error_code);
 
+    if ($input === null) {
 
-    $stmt = mysqli_prepare(
-        $conn,
+        $message = $subject_errors[$error_code] ?? $subject_errors['save'];
 
-        "INSERT INTO subjects
-        (
-            user_id,
-            subject_name,
-            subject_code,
-            credit,
-            description
-        )
-        VALUES (?, ?, ?, ?, ?)"
-    );
+    } else {
 
+        $stmt = mysqli_prepare(
+            $conn,
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "issis",
-        $user_id,
-        $subject_name,
-        $subject_code,
-        $credit,
-        $description
-    );
+            "INSERT INTO subjects
+            (
+                user_id,
+                subject_name,
+                subject_code,
+                credit,
+                description
+            )
+            VALUES (?, ?, ?, ?, ?)"
+        );
 
+        $inserted = $stmt && mysqli_stmt_execute($stmt, array(
+            $user_id,
+            $input['subject_name'],
+            $input['subject_code'],
+            $input['credit'],
+            $input['description'],
+        ));
 
-    if (mysqli_stmt_execute($stmt)) {
+        if ($stmt) {
+            mysqli_stmt_close($stmt);
+        }
 
-        mysqli_stmt_close($stmt);
+        if ($inserted) {
+            header("Location: subjects.php?success=1");
+            exit();
+        }
 
-        header("Location: subjects.php?success=1");
-
-        exit();
-
+        $message = $subject_errors['save'];
     }
-
-
-    mysqli_stmt_close($stmt);
-
 }
 
 
@@ -97,13 +144,17 @@ if (isset($_POST['update_subject'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $id = $_POST['id'];
+    $id = (int) $_POST['id'];
 
-    $subject_name = trim($_POST['subject_name']);
-    $subject_code = trim($_POST['subject_code']);
-    $credit = $_POST['credit'];
-    $description = trim($_POST['description']);
+    $error_code = "";
+    $input = collect_subject_input($error_code);
 
+    if ($input === null) {
+
+        header("Location: subjects.php?edit=$id&err=" . urlencode($error_code ?: 'save'));
+        exit();
+
+    }
 
     $stmt = mysqli_prepare(
         $conn,
@@ -119,32 +170,21 @@ if (isset($_POST['update_subject'])) {
          AND user_id = ?"
     );
 
-
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ssisii",
-        $subject_name,
-        $subject_code,
-        $credit,
-        $description,
+    $updated = $stmt && mysqli_stmt_execute($stmt, array(
+        $input['subject_name'],
+        $input['subject_code'],
+        $input['credit'],
+        $input['description'],
         $id,
-        $user_id
-    );
+        $user_id,
+    ));
 
-
-    if (mysqli_stmt_execute($stmt)) {
-
+    if ($stmt) {
         mysqli_stmt_close($stmt);
-
-        header("Location: subjects.php?updated=1");
-
-        exit();
-
     }
 
-
-    mysqli_stmt_close($stmt);
-
+    header("Location: subjects.php?" . ($updated ? "updated=1" : "err=save"));
+    exit();
 }
 
 
@@ -156,40 +196,67 @@ if (isset($_POST['delete_id'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $id = $_POST['delete_id'];
+    $id = (int) $_POST['delete_id'];
 
+    // The foreign keys would refuse this delete while tasks or
+    // materials still point at the subject, so clear the children
+    // first - scoped to this user - inside one transaction.
+    mysqli_begin_transaction($conn);
 
-    $stmt = mysqli_prepare(
-        $conn,
+    $ok = true;
 
-        "DELETE FROM subjects
-
-         WHERE id = ?
-         AND user_id = ?"
+    $child_deletes = array(
+        "DELETE FROM tasks WHERE subject_id = ? AND user_id = ?",
+        "DELETE FROM materials WHERE subject_id = ? AND user_id = ?",
     );
 
+    foreach ($child_deletes as $sql) {
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ii",
-        $id,
-        $user_id
-    );
+        $s = mysqli_prepare($conn, $sql);
 
+        if (!$s) {
+            $ok = false;
+            break;
+        }
 
-    if (mysqli_stmt_execute($stmt)) {
+        mysqli_stmt_bind_param($s, "ii", $id, $user_id);
+        $ok = mysqli_stmt_execute($s);
+        mysqli_stmt_close($s);
 
-        mysqli_stmt_close($stmt);
-
-        header("Location: subjects.php?deleted=1");
-
-        exit();
-
+        if (!$ok) {
+            break;
+        }
     }
 
+    if ($ok) {
 
-    mysqli_stmt_close($stmt);
+        $s = mysqli_prepare(
+            $conn,
 
+            "DELETE FROM subjects
+
+             WHERE id = ?
+             AND user_id = ?"
+        );
+
+        if ($s) {
+            mysqli_stmt_bind_param($s, "ii", $id, $user_id);
+            $ok = mysqli_stmt_execute($s) && mysqli_stmt_affected_rows($s) > 0;
+            mysqli_stmt_close($s);
+        } else {
+            $ok = false;
+        }
+    }
+
+    if ($ok) {
+        mysqli_commit($conn);
+        header("Location: subjects.php?deleted=1");
+    } else {
+        mysqli_rollback($conn);
+        header("Location: subjects.php?err=save");
+    }
+
+    exit();
 }
 
 
@@ -202,7 +269,7 @@ $edit_subject = null;
 
 if (isset($_GET['edit'])) {
 
-    $edit_id = $_GET['edit'];
+    $edit_id = (int) $_GET['edit'];
 
 
     $stmt = mysqli_prepare(
@@ -222,32 +289,37 @@ if (isset($_GET['edit'])) {
     );
 
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ii",
-        $edit_id,
-        $user_id
-    );
+    $edit_result = null;
+
+    if ($stmt) {
+
+        mysqli_stmt_bind_param(
+            $stmt,
+            "ii",
+            $edit_id,
+            $user_id
+        );
+
+        mysqli_stmt_execute($stmt);
+
+        $edit_result =
+            mysqli_stmt_get_result($stmt);
+
+        mysqli_stmt_close($stmt);
+    }
 
 
-    mysqli_stmt_execute($stmt);
-
-
-    $edit_result =
-        mysqli_stmt_get_result($stmt);
-
-
+    // Guarded: mysqli_num_rows() is a TypeError on PHP 8 if the
+    // statement failed and returned false.
     if (
-        mysqli_num_rows($edit_result) > 0
+        $edit_result instanceof mysqli_result
+        && mysqli_num_rows($edit_result) > 0
     ) {
 
         $edit_subject =
             mysqli_fetch_assoc($edit_result);
 
     }
-
-
-    mysqli_stmt_close($stmt);
 
 }
 
@@ -379,12 +451,8 @@ mysqli_stmt_close($stmt);
 
             <?php
 
-            echo strtoupper(
-                substr(
-                    $_SESSION['user_name'],
-                    0,
-                    1
-                )
+            echo initial(
+                $_SESSION['user_name']
             );
 
             ?>
@@ -544,7 +612,7 @@ mysqli_stmt_close($stmt);
         <!-- LOGOUT -->
 
         <a
-            href="logout.php"
+            href="logout.php?token=<?php echo e($csrf_token); ?>"
             class="sidebar-logout"
         >
 
@@ -653,6 +721,17 @@ mysqli_stmt_close($stmt);
          ================================================== -->
 
 
+    <?php if ($message != "") { ?>
+
+        <div class="subject-message" style="background:#fdecec;color:#c0392b;">
+
+            <?php echo e($message); ?>
+
+        </div>
+
+    <?php } ?>
+
+
     <?php if (isset($_GET['success'])) { ?>
 
         <div class="subject-message">
@@ -750,7 +829,7 @@ mysqli_stmt_close($stmt);
 
         <form method="POST">
                 <input type="hidden" name="csrf_token"
-                     value="<?php echo $csrf_token; ?>">
+                     value="<?php echo e($csrf_token); ?>">
 
 
             <!-- EDIT ID -->
@@ -1257,7 +1336,7 @@ mysqli_stmt_close($stmt);
 
                                     <!-- DELETE -->
 
-                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this subject?');"><input type="hidden" name="delete_id" value="<?php echo $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>"><button type="submit" class="delete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#df5353;font-weight:bold;font-size:13px;">Delete</button></form>
+                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Delete this subject? Its study tasks and linked materials will be deleted too.');"><input type="hidden" name="delete_id" value="<?php echo (int) $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo e($csrf_token); ?>"><button type="submit" class="delete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#df5353;font-weight:bold;font-size:13px;">Delete</button></form>
 
 
                                 </div>

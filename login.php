@@ -1,20 +1,11 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
+$csrf_token = csrf_token();
 
 // Already logged in? Redirect based on role.
 if (isset($_SESSION['user_id'])) {
@@ -37,50 +28,77 @@ if (isset($_POST['login'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $email = $_POST['email'];
-    $password = $_POST['password'];
+    $email = normalize_email($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $ip = client_ip();
 
-    // Prepared statement -- fetch user by email only (password verified in PHP)
-    $sql = "SELECT * FROM users WHERE email = ? LIMIT 1";
-    $stmt = mysqli_prepare($conn, $sql);
+    // Brute-force throttle. Without it this endpoint accepts an
+    // unlimited number of guesses against a known address.
+    if (login_is_locked($conn, $email, $ip)) {
+        $message = "Too many failed attempts. Please try again in a few minutes.";
+    } else {
 
-    if ($stmt) {
-        mysqli_stmt_bind_param($stmt, "s", $email);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
+        // Prepared statement -- fetch user by email only (password verified in PHP)
+        $sql = "SELECT * FROM users WHERE email = ? LIMIT 1";
+        $stmt = mysqli_prepare($conn, $sql);
 
-        if (mysqli_num_rows($result) == 1) {
+        $authenticated = false;
+        $user = null;
 
-            $user = mysqli_fetch_assoc($result);
+        if ($stmt) {
+            mysqli_stmt_bind_param($stmt, "s", $email);
+            mysqli_stmt_execute($stmt);
+            $result = mysqli_stmt_get_result($stmt);
 
-            // Verify hashed password
-            if (password_verify($password, $user['password'])) {
+            if ($result && mysqli_num_rows($result) == 1) {
 
-                // Regenerate session ID to prevent fixation
-                session_regenerate_id(true);
+                $candidate = mysqli_fetch_assoc($result);
 
-                $_SESSION['user_id'] = $user['id'];
-                $_SESSION['user_name'] = $user['name'];
-                $_SESSION['user_role'] = $user['role'];
+                // Verify hashed password
+                if ($candidate && password_verify($password, $candidate['password'])) {
 
-                if ($user['role'] === 'admin') {
-                    header("Location: admin/dashboard.php");
-                } else {
-                    header("Location: dashboard.php");
+                    $user = $candidate;
+                    $authenticated = true;
                 }
-                exit();
-
-            } else {
-                $message = "Invalid email or password.";
             }
 
+            mysqli_stmt_close($stmt);
+
         } else {
+            $message = "An error occurred. Please try again.";
+        }
+
+        if ($message === "" && !$authenticated) {
+
+            // Identical wording for "no such account" and "wrong password",
+            // so the form cannot be used to enumerate registered addresses.
             $message = "Invalid email or password.";
         }
 
-        mysqli_stmt_close($stmt);
-    } else {
-        $message = "An error occurred. Please try again.";
+        record_login_attempt($conn, $email, $ip, $authenticated);
+
+        if ($authenticated) {
+
+            clear_login_attempts($conn, $email, $ip);
+
+            // Regenerate session ID to prevent fixation
+            session_regenerate_id(true);
+
+            // A new token after the privilege change, so a token that
+            // was readable before login cannot be replayed afterwards.
+            rotate_csrf_token();
+
+            $_SESSION['user_id'] = $user['id'];
+            $_SESSION['user_name'] = $user['name'];
+            $_SESSION['user_role'] = $user['role'];
+
+            if ($user['role'] === 'admin') {
+                header("Location: admin/dashboard.php");
+            } else {
+                header("Location: dashboard.php");
+            }
+            exit();
+        }
     }
 }
 
@@ -138,7 +156,7 @@ include "includes/navbar.php";
 
         <form method="POST">
                 <input type="hidden" name="csrf_token"
-                     value="<?php echo $csrf_token; ?>">
+                     value="<?php echo e($csrf_token); ?>">
 
             <div class="form-group">
 

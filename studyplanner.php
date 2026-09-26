@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require_once __DIR__ . "/includes/security.php";
 
 include "config/database.php";
 
@@ -9,28 +9,100 @@ include "config/database.php";
 // CHECK LOGIN
 // ======================================================
 
-if (!isset($_SESSION['user_id'])) {
+require_login();
 
-    header("Location: login.php");
-    exit();
-
-}
-
-$user_id = $_SESSION['user_id'];
+$user_id = current_user_id();
 
 // CSRF token
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+$csrf_token = csrf_token();
+
+
+$task_errors = array(
+    'subject' => "Please choose one of your own subjects.",
+    'title'   => "Please enter a task title (150 characters max).",
+    'desc'    => "Description must be 255 characters or fewer.",
+    'dates'   => "Please enter valid study and due dates.",
+    'due'     => "The due date cannot be earlier than the study date.",
+    'priority'=> "Please choose a valid priority.",
+    'status'  => "Please choose a valid status.",
+    'save'    => "Could not save the task. Please try again.",
+);
+
+$message = "";
+
+if (isset($_GET['err']) && isset($task_errors[$_GET['err']])) {
+    $message = $task_errors[$_GET['err']];
 }
-$csrf_token = $_SESSION['csrf_token'];
 
 
-function verify_csrf() {
-    return isset($_POST['csrf_token'])
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
+/**
+ * Collect and validate the fields shared by the add and update
+ * handlers. Returns null and sets $error_code on the first problem.
+ */
+function collect_task_input($conn, $user_id, &$error_code)
+{
+    $error_code = "";
+
+    $subject_id  = (int) ($_POST['subject_id'] ?? 0);
+    $title       = trim($_POST['title'] ?? '');
+    $description = trim($_POST['description'] ?? '');
+    $study_date  = trim($_POST['study_date'] ?? '');
+    $due_date    = trim($_POST['due_date'] ?? '');
+    $priority    = trim($_POST['priority'] ?? '');
+    $status      = trim($_POST['status'] ?? '');
+
+    // The subject must belong to this user; otherwise a task can be
+    // filed under somebody else's subject and its name leaks through
+    // the listing JOIN.
+    if (!user_owns_subject($conn, $user_id, $subject_id)) {
+        $error_code = 'subject';
+        return null;
+    }
+
+    if ($title === '' || strlen($title) > 150) {
+        $error_code = 'title';
+        return null;
+    }
+
+    if (strlen($description) > 255) {
+        $error_code = 'desc';
+        return null;
+    }
+
+    // Strict YYYY-MM-DD so a malformed date cannot reach the column
+    // and surface as 1970 in the listing.
+    $date_pattern = '/^\d{4}-\d{2}-\d{2}$/';
+
+    if (!preg_match($date_pattern, $study_date) || !preg_match($date_pattern, $due_date)) {
+        $error_code = 'dates';
+        return null;
+    }
+
+    if (strtotime($due_date) < strtotime($study_date)) {
+        $error_code = 'due';
+        return null;
+    }
+
+    if (!is_valid_priority($priority)) {
+        $error_code = 'priority';
+        return null;
+    }
+
+    if (!is_valid_status($status)) {
+        $error_code = 'status';
+        return null;
+    }
+
+    return array(
+        'subject_id'  => $subject_id,
+        'title'       => $title,
+        'description' => $description,
+        'study_date'  => $study_date,
+        'due_date'    => $due_date,
+        'priority'    => $priority,
+        'status'      => $status,
+    );
 }
-
 
 
 // ======================================================
@@ -41,47 +113,45 @@ if (isset($_POST['add_task'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $subject_id = $_POST['subject_id'];
-    $title = trim($_POST['title']);
-    $description = trim($_POST['description']);
-    $study_date = $_POST['study_date'];
-    $due_date = $_POST['due_date'];
-    $priority = $_POST['priority'];
-    $status = $_POST['status'];
+    $error_code = "";
+    $input = collect_task_input($conn, $user_id, $error_code);
 
+    if ($input === null) {
 
-    $stmt = mysqli_prepare(
-        $conn,
-        "INSERT INTO tasks
-        (user_id, subject_id, title, description, study_date, due_date, priority, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    );
+        $message = $task_errors[$error_code] ?? $task_errors['save'];
 
+    } else {
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "iissssss",
-        $user_id,
-        $subject_id,
-        $title,
-        $description,
-        $study_date,
-        $due_date,
-        $priority,
-        $status
-    );
+        $stmt = mysqli_prepare(
+            $conn,
+            "INSERT INTO tasks
+            (user_id, subject_id, title, description, study_date, due_date, priority, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        );
 
+        $inserted = $stmt && mysqli_stmt_execute($stmt, array(
+            $user_id,
+            $input['subject_id'],
+            $input['title'],
+            $input['description'],
+            $input['study_date'],
+            $input['due_date'],
+            $input['priority'],
+            $input['status'],
+        ));
 
-    mysqli_stmt_execute($stmt);
+        if ($stmt) {
+            mysqli_stmt_close($stmt);
+        }
 
-    mysqli_stmt_close($stmt);
+        // Only report success when the row was really written.
+        if ($inserted) {
+            header("Location: studyplanner.php?success=1");
+            exit();
+        }
 
-
-    // Prevent duplicate insertion after refresh
-
-    header("Location: studyplanner.php?success=1");
-    exit();
-
+        $message = $task_errors['save'];
+    }
 }
 
 
@@ -93,20 +163,20 @@ if (isset($_POST['update_task'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $task_id = $_POST['task_id'];
+    $task_id = (int) $_POST['task_id'];
 
-    $subject_id = $_POST['subject_id'];
-    $title = trim($_POST['title']);
-    $description = trim($_POST['description']);
-    $study_date = $_POST['study_date'];
-    $due_date = $_POST['due_date'];
-    $priority = $_POST['priority'];
-    $status = $_POST['status'];
+    $error_code = "";
+    $input = collect_task_input($conn, $user_id, $error_code);
 
+    if ($input === null) {
+
+        header("Location: studyplanner.php?edit=$task_id&err=" . urlencode($error_code ?: 'save'));
+        exit();
+
+    }
 
     $stmt = mysqli_prepare(
         $conn,
-
         "UPDATE tasks SET
             subject_id = ?,
             title = ?,
@@ -119,28 +189,23 @@ if (isset($_POST['update_task'])) {
         AND user_id = ?"
     );
 
-
-    mysqli_stmt_bind_param(
-        $stmt,
-        "issssssii",
-        $subject_id,
-        $title,
-        $description,
-        $study_date,
-        $due_date,
-        $priority,
-        $status,
+    $updated = $stmt && mysqli_stmt_execute($stmt, array(
+        $input['subject_id'],
+        $input['title'],
+        $input['description'],
+        $input['study_date'],
+        $input['due_date'],
+        $input['priority'],
+        $input['status'],
         $task_id,
-        $user_id
-    );
+        $user_id,
+    ));
 
+    if ($stmt) {
+        mysqli_stmt_close($stmt);
+    }
 
-    mysqli_stmt_execute($stmt);
-
-    mysqli_stmt_close($stmt);
-
-
-    header("Location: studyplanner.php?updated=1");
+    header("Location: studyplanner.php?" . ($updated ? "updated=1" : "err=save"));
     exit();
 
 }
@@ -154,32 +219,28 @@ if (isset($_POST['delete_id'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $task_id = $_POST['delete_id'];
-
+    $task_id = (int) $_POST['delete_id'];
 
     $stmt = mysqli_prepare(
         $conn,
-
         "DELETE FROM tasks
          WHERE id = ?
          AND user_id = ?"
     );
 
+    $deleted = false;
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ii",
-        $task_id,
-        $user_id
-    );
+    if ($stmt) {
+        mysqli_stmt_bind_param($stmt, "ii", $task_id, $user_id);
 
+        if (mysqli_stmt_execute($stmt)) {
+            $deleted = mysqli_stmt_affected_rows($stmt) > 0;
+        }
 
-    mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+    }
 
-    mysqli_stmt_close($stmt);
-
-
-    header("Location: studyplanner.php?deleted=1");
+    header("Location: studyplanner.php?" . ($deleted ? "deleted=1" : "err=save"));
     exit();
 
 }
@@ -193,36 +254,31 @@ if (isset($_POST['complete_id'])) {
 
     if (!verify_csrf()) { die('Invalid request.'); }
 
-    $task_id = $_POST['complete_id'];
+    $task_id = (int) $_POST['complete_id'];
 
     $status = "Completed";
 
-
     $stmt = mysqli_prepare(
         $conn,
-
         "UPDATE tasks
          SET status = ?
          WHERE id = ?
          AND user_id = ?"
     );
 
+    $done = false;
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "sii",
-        $status,
-        $task_id,
-        $user_id
-    );
+    if ($stmt) {
+        mysqli_stmt_bind_param($stmt, "sii", $status, $task_id, $user_id);
 
+        if (mysqli_stmt_execute($stmt)) {
+            $done = mysqli_stmt_affected_rows($stmt) > 0;
+        }
 
-    mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+    }
 
-    mysqli_stmt_close($stmt);
-
-
-    header("Location: studyplanner.php?status=1");
+    header("Location: studyplanner.php?" . ($done ? "status=1" : "err=save"));
     exit();
 
 }
@@ -270,7 +326,7 @@ $edit_task = null;
 
 if (isset($_GET['edit'])) {
 
-    $edit_id = $_GET['edit'];
+    $edit_id = (int) $_GET['edit'];
 
 
     $stmt = mysqli_prepare(
@@ -291,31 +347,37 @@ if (isset($_GET['edit'])) {
     );
 
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ii",
-        $edit_id,
-        $user_id
-    );
+    $edit_result = null;
+
+    if ($stmt) {
+
+        mysqli_stmt_bind_param(
+            $stmt,
+            "ii",
+            $edit_id,
+            $user_id
+        );
+
+        mysqli_stmt_execute($stmt);
+
+        $edit_result =
+            mysqli_stmt_get_result($stmt);
+
+        mysqli_stmt_close($stmt);
+    }
 
 
-    mysqli_stmt_execute($stmt);
-
-    $edit_result =
-        mysqli_stmt_get_result($stmt);
-
-
+    // Guarded: mysqli_num_rows() throws a TypeError on PHP 8 when
+    // the statement failed and handed back false.
     if (
-        mysqli_num_rows($edit_result) > 0
+        $edit_result instanceof mysqli_result
+        && mysqli_num_rows($edit_result) > 0
     ) {
 
         $edit_task =
             mysqli_fetch_assoc($edit_result);
 
     }
-
-
-    mysqli_stmt_close($stmt);
 
 }
 
@@ -456,12 +518,8 @@ $total_tasks =
 
             <?php
 
-            echo strtoupper(
-                substr(
-                    $_SESSION['user_name'],
-                    0,
-                    1
-                )
+            echo initial(
+                $_SESSION['user_name']
             );
 
             ?>
@@ -603,7 +661,7 @@ $total_tasks =
 
 
         <a
-            href="logout.php"
+            href="logout.php?token=<?php echo e($csrf_token); ?>"
             class="sidebar-logout"
         >
 
@@ -708,6 +766,17 @@ $total_tasks =
     <!-- ==================================================
          MESSAGES
          ================================================== -->
+
+    <?php if ($message != "") { ?>
+
+        <div class="planner-message delete-message">
+
+            <?php echo e($message); ?>
+
+        </div>
+
+    <?php } ?>
+
 
     <?php if (isset($_GET['success'])) { ?>
 
@@ -828,7 +897,7 @@ $total_tasks =
 
         <form method="POST">
                 <input type="hidden" name="csrf_token"
-                     value="<?php echo $csrf_token; ?>">
+                     value="<?php echo e($csrf_token); ?>">
 
 
             <?php if ($edit_task != null) { ?>
@@ -1636,10 +1705,10 @@ $total_tasks =
 
                                 <?php
 
+                                // slug() reduces the value to [a-z0-9-], so it
+                                // can never break out of the class attribute.
                                 $priority_class =
-                                    strtolower(
-                                        $priority
-                                    );
+                                    css_slug($priority);
 
                                 ?>
 
@@ -1647,15 +1716,13 @@ $total_tasks =
                                 <span
                                     class="priority-badge
                                     priority-<?php
-                                    echo $priority_class;
+                                    echo e($priority_class);
                                     ?>"
                                 >
 
                                     <?php
 
-                                    echo htmlspecialchars(
-                                        $priority
-                                    );
+                                    echo e($priority);
 
                                     ?>
 
@@ -1672,13 +1739,7 @@ $total_tasks =
                                 <?php
 
                                 $status_class =
-                                    strtolower(
-                                        str_replace(
-                                            " ",
-                                            "-",
-                                            $status
-                                        )
-                                    );
+                                    css_slug($status);
 
                                 ?>
 
@@ -1686,7 +1747,7 @@ $total_tasks =
                                 <span
                                     class="status-badge
                                     status-<?php
-                                    echo $status_class;
+                                    echo e($status_class);
                                     ?>"
                                 >
 
@@ -1701,9 +1762,7 @@ $total_tasks =
 
                                     }
 
-                                    echo htmlspecialchars(
-                                        $status
-                                    );
+                                    echo e($status);
 
                                     ?>
 
@@ -1748,7 +1807,7 @@ $total_tasks =
 
                                     ?>
 
-                                        <form method="POST" style="display:inline;" onsubmit="return confirm('Mark this task as completed?');"><input type="hidden" name="complete_id" value="<?php echo $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>"><button type="submit" class="task-complete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#21864b;font-weight:bold;font-size:14px;">&#10003;</button></form>
+                                        <form method="POST" style="display:inline;" onsubmit="return confirm('Mark this task as completed?');"><input type="hidden" name="complete_id" value="<?php echo (int) $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo e($csrf_token); ?>"><button type="submit" class="task-complete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#21864b;font-weight:bold;font-size:14px;">&#10003;</button></form>
 
                                     <?php
 
@@ -1760,7 +1819,7 @@ $total_tasks =
 
                                     <!-- DELETE -->
 
-                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this task?');"><input type="hidden" name="delete_id" value="<?php echo $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>"><button type="submit" class="task-delete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#df5353;font-weight:bold;font-size:11px;">Delete</button></form>
+                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this task?');"><input type="hidden" name="delete_id" value="<?php echo (int) $row['id']; ?>"><input type="hidden" name="csrf_token" value="<?php echo e($csrf_token); ?>"><button type="submit" class="task-delete-button" style="background:none;border:none;padding:0;cursor:pointer;color:#df5353;font-weight:bold;font-size:11px;">Delete</button></form>
 
 
                                 </div>
